@@ -79,27 +79,44 @@ jobs:
           (Get-FileHash WhatsApp.exe -Algorithm SHA256).Hash + "  WhatsApp.exe" | Out-File -Encoding ascii WhatsApp.exe.sha256
           Get-Content WhatsApp.exe.sha256 | Out-Host
 
-      - name: Generate release notes (full history awal->sekarang)
+      - name: Generate release notes (delta per versi)
         shell: pwsh
         run: |
           $tag = "${{ steps.tag.outputs.name }}"
           $notes = ".github/RELEASE_NOTES_$tag.md"
+          # Resolve previous tag for delta range
+          $prev = ""
+          try { $prev = (git describe --tags --abbrev=0 "$tag^" 2>$null).Trim() } catch {}
+          if (-not $prev) {
+            # fallback: previous semver tag sorted
+            $all = git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1
+            if ($all) { $prev = $all.Trim() }
+          }
+          $range = if ($prev) { "$prev..$tag" } else { "$tag" }
+          $shortHead = git rev-parse --short HEAD
           "# $tag - NODRYX/Whatsapp-Desktop`n`n" | Out-File -Encoding utf8 $notes
-          "Full history dari awal sampai $tag (HEAD $(git rev-parse --short HEAD)):`n" | Out-File -Append -Encoding utf8 $notes
-          "## Commits`n" | Out-File -Append -Encoding utf8 $notes
-          git log --reverse --pretty=format:"- %s (%h) — %ad — %an" --date=short | Out-File -Append -Encoding utf8 $notes
-          "`n`n## Ringkasan Perubahan (dari README)`n" | Out-File -Append -Encoding utf8 $notes
-          "Lihat tabel 6 tema di README `perbedaan-dari-upstream--whats-changed`:`n" | Out-File -Append -Encoding utf8 $notes
-          "- Icon pipeline: logo.avif 740x740 -> gen_icon.py lanczos -> icon.ico multi-size + logo.png`n" | Out-File -Append -Encoding utf8 $notes
-          "- Toast fallback: logo.png -> icon.ico (main.go:118-128)`n" | Out-File -Append -Encoding utf8 $notes
-          "- Hapus User-Agent spoofing (main.go:161-163)`n" | Out-File -Append -Encoding utf8 $notes
-          "- Notification bridge OrigNotification + fallback (main.go:164-202)`n" | Out-File -Append -Encoding utf8 $notes
-          "- Low-resource tuning 6 fitur + resource filter (webview.go:132-207)`n" | Out-File -Append -Encoding utf8 $notes
-          "- Stabilitas chromium.go:281-284 (log.Printf bukan log.Fatal)`n" | Out-File -Append -Encoding utf8 $notes
+          if ($prev) {
+            "## Perubahan di $tag (sejak $prev)`n" | Out-File -Append -Encoding utf8 $notes
+            "_Range: ``$range`` | HEAD $shortHead_`n`n" | Out-File -Append -Encoding utf8 $notes
+          } else {
+            "## Perubahan di $tag (rilis awal)`n" | Out-File -Append -Encoding utf8 $notes
+            "_HEAD $shortHead_`n`n" | Out-File -Append -Encoding utf8 $notes
+          }
+          "### Commits`n" | Out-File -Append -Encoding utf8 $notes
+          $log = git log --reverse --pretty=format:"- %s (%h) — %ad — %an" --date=short $range 2>&1
+          if (-not $log) { $log = "- (tidak ada commits baru di range $range)" }
+          $log | Out-File -Append -Encoding utf8 $notes
+          "`n`n### Stat`n" | Out-File -Append -Encoding utf8 $notes
+          "```````n" | Out-File -Append -Encoding utf8 $notes
+          git diff --stat $range 2>$null | Out-File -Append -Encoding utf8 $notes
+          "`````` `n" | Out-File -Append -Encoding utf8 $notes
+          if ($prev) {
+            "`nFull Changelog: https://github.com/NODRYX/Whatsapp-Desktop/compare/$prev...$tag`n" | Out-File -Append -Encoding utf8 $notes
+          }
           "`n## Build`n" | Out-File -Append -Encoding utf8 $notes
           "- Go $(go version) | rsrc + go build -ldflags=`"-H windowsgui -s -w`" -trimpath`n" | Out-File -Append -Encoding utf8 $notes
-          "- Runner: windows-latest`n" | Out-File -Append -Encoding utf8 $notes
-          "---`n_Auto-generated dari git log awal->sekarang untuk $tag._`n" | Out-File -Append -Encoding utf8 $notes
+          "- Runner: windows-latest | manifest $(Select-String -Path app.manifest -Pattern 'version=' | ForEach-Object { $_.Line.Trim() })`n" | Out-File -Append -Encoding utf8 $notes
+          "---`n_Auto-generated delta ``$range`` untuk $tag._`n" | Out-File -Append -Encoding utf8 $notes
           Get-Content $notes | Out-Host
           "notes_file=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         id: notes
