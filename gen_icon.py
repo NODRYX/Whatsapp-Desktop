@@ -1,52 +1,74 @@
+"""Regenerate app icons from logo.avif (single source of truth).
+
+The 740x740 AVIF is downscaled first (never used at full size), then packed:
+  - logo.png  : 256x256 PNG for Windows toast notifications
+  - icon.ico  : multi-size ICO (16/32/48/64/128/256, PNG-compressed entries)
+                referenced by resource.rc and embedded via rsrc.syso
+
+Requires: ffmpeg on PATH (decodes AVIF).
+
+Usage:  python gen_icon.py
+Then:   rsrc -manifest app.manifest -ico icon.ico -o rsrc.syso
+"""
+
 import struct
+import subprocess
+import sys
+from pathlib import Path
 
-def make_whatsapp_icon():
-    # 32x32 RGBA icon
-    width = 32
-    height = 32
-    # BMP / DIB header & pixels (bottom-up)
-    pixels = []
-    # WhatsApp green: #25D366 (RGBA: 37, 211, 102, 255)
-    # Background transparent: (0,0,0,0)
-    center_x = 15.5
-    center_y = 15.5
-    radius = 14.0
-    for y in range(height):
-        row = []
-        for x in range(width):
-            dist = ((x - center_x)**2 + (y - center_y)**2)**0.5
-            if dist <= radius:
-                # Inner phone shape or green circle
-                # simple circle with white inner dot
-                inner_dist = ((x - 16)**2 + (y - 16)**2)**0.5
-                if 4.0 <= inner_dist <= 8.0 and (x >= 14 or y >= 14):
-                    # White icon feature
-                    row.extend([255, 255, 255, 255])
-                else:
-                    # Green bubble
-                    row.extend([37, 211, 102, 255])
-            else:
-                row.extend([0, 0, 0, 0])
-        pixels.append(bytes(row))
+HERE = Path(__file__).resolve().parent
+SOURCE = HERE / "logo.avif"
+# Downscaled sizes: 256 for toast + full ICO set. Source is 740x740.
+SIZES = [16, 32, 48, 64, 128, 256]
 
-    xor_mask = b''.join(pixels)
-    and_mask = b'\x00' * (width * height // 8) # 1-bit mask
 
-    # ICONDIR (6 bytes)
-    # idReserved=0, idType=1, idCount=1
-    icondir = struct.pack('<HHH', 0, 1, 1)
+def run(cmd: list[str]) -> None:
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("FAILED:", " ".join(cmd), file=sys.stderr)
+        print(r.stderr[-2000:], file=sys.stderr)
+        sys.exit(1)
 
-    # ICONDIRENTRY (16 bytes)
-    # bWidth, bHeight, bColorCount, bReserved, wPlanes, wBitCount, dwBytesInRes, dwImageOffset
-    image_size = 40 + len(xor_mask) + len(and_mask)
-    offset = 6 + 16
-    direntry = struct.pack('<BBBBHHII', width, height, 0, 0, 1, 32, image_size, offset)
 
-    # BITMAPINFOHEADER (40 bytes)
-    # biSize, biWidth, biHeight (x2 for ICO), biPlanes, biBitCount, biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant
-    bih = struct.pack('<IIIHHIIIIII', 40, width, height * 2, 1, 32, 0, len(xor_mask), 0, 0, 0, 0)
+def main() -> None:
+    if not SOURCE.exists():
+        print(f"missing source: {SOURCE}", file=sys.stderr)
+        sys.exit(1)
 
-    with open('icon.ico', 'wb') as f:
-        f.write(icondir + direntry + bih + xor_mask + and_mask)
+    pngs: dict[int, bytes] = {}
+    for size in SIZES:
+        out = HERE / f".icon-{size}.png"
+        # Downscale first with high-quality lanczos; AVIF input is 740x740.
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(SOURCE),
+            "-vf", f"scale={size}:{size}:flags=lanczos",
+            "-frames:v", "1",
+            str(out),
+        ])
+        pngs[size] = out.read_bytes()
 
-make_whatsapp_icon()
+    # logo.png for toast notifications (256px downscaled).
+    (HERE / "logo.png").write_bytes(pngs[256])
+
+    # icon.ico: ICONDIR + entries + PNG payloads (Vista+ supports PNG in ICO).
+    count = len(SIZES)
+    header = struct.pack("<HHH", 0, 1, count)
+    entries = b""
+    offset = 6 + 16 * count
+    for size in SIZES:
+        data = pngs[size]
+        w = h = 0 if size == 256 else size
+        entries += struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    with open(HERE / "icon.ico", "wb") as f:
+        f.write(header + entries + b"".join(pngs[s] for s in SIZES))
+
+    for size in SIZES:
+        (HERE / f".icon-{size}.png").unlink(missing_ok=True)
+
+    print(f"wrote logo.png + icon.ico ({count} sizes) from {SOURCE.name}")
+
+
+if __name__ == "__main__":
+    main()

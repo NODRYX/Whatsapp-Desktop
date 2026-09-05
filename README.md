@@ -50,9 +50,12 @@ The repository includes the Windows manifest and embedded icon resource used by 
 ## Project Files
 
 - `main.go`: WebView2 window, persistent profile, dark frame, and notifications.
+- `logo.avif`: master logo source (740x740). Downscaled at build time, never used directly.
+- `logo.png`: 256px toast icon generated from `logo.avif` (shipped next to the exe).
+- `gen_icon.py`: regenerates `logo.png` + multi-size `icon.ico` from `logo.avif` (requires ffmpeg).
 - `app.manifest`: Windows DPI and application manifest.
 - `resource.rc`: Windows icon and manifest resource definitions.
-- `icon.ico`: Application icon.
+- `icon.ico`: Application icon (generated, multi-size 16-256).
 
 ## Privacy
 

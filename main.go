@@ -27,7 +27,6 @@ const (
 	windowTitle = "WhatsApp Desktop"
 	appURL      = "https://web.whatsapp.com"
 	mutexName   = "WhatsAppDesktopSingleInstanceMutex"
-	userAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 	// DWM Window Attributes for Dark Theme
 	DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
@@ -117,7 +116,16 @@ func main() {
 	}
 	userDataDir := getUserDataDir()
 	executablePath, _ := os.Executable()
-	iconFullPath := filepath.Join(filepath.Dir(executablePath), "icon.ico")
+	exeDir := filepath.Dir(executablePath)
+	// Toast icon: prefer logo.png (converted from logo.avif), fall back to
+	// icon.ico, and finally no icon if neither is deployed next to the exe.
+	iconFullPath := filepath.Join(exeDir, "logo.png")
+	if _, err := os.Stat(iconFullPath); err != nil {
+		iconFullPath = filepath.Join(exeDir, "icon.ico")
+		if _, err := os.Stat(iconFullPath); err != nil {
+			iconFullPath = ""
+		}
+	}
 
 	opts := webview2.WebViewOptions{
 		Window:    nil,
@@ -150,18 +158,30 @@ func main() {
 		go showNativeNotification(title, body, iconFullPath)
 	})
 
-	// Inject JS: User-Agent spoofing + Notification API polyfill connecting to Go native Toast
+	// Bridge page notifications to Windows toasts. No User-Agent spoofing:
+	// the WebView2 runtime reports its own current Edge UA (header and JS),
+	// which stays up to date unlike a frozen string.
 	initScript := `
-		// UserAgent override
-		Object.defineProperty(navigator, 'userAgent', {
-			get: () => '` + userAgent + `'
-		});
-		Object.defineProperty(navigator, 'appVersion', {
-			get: () => '` + userAgent + `'
-		});
-
-		// Native Notification Polyfill for Windows Desktop Toast
+		// Native Notification bridge for Windows Desktop Toast
 		(function() {
+			try {
+				if (window.Notification && window.Notification.permission === 'granted') {
+					var OrigNotification = window.Notification;
+					window.Notification = function(title, options) {
+						try {
+							var body = (options && options.body) || '';
+							if (window.sendNativeNotification) {
+								window.sendNativeNotification(title, body);
+							}
+						} catch (e) {}
+						return new OrigNotification(title, options);
+					};
+					window.Notification.prototype = OrigNotification.prototype;
+					window.Notification.permission = OrigNotification.permission;
+					window.Notification.requestPermission = OrigNotification.requestPermission.bind(OrigNotification);
+					return;
+				}
+			} catch (e) {}
 			window.Notification = function(title, options) {
 				options = options || {};
 				var body = options.body || '';
@@ -169,10 +189,7 @@ func main() {
 					window.sendNativeNotification(title, body);
 				}
 				this.title = title;
-				this.onclick = null;
-				this.onclose = null;
-				this.onerror = null;
-				this.onshow = null;
+				this.close = function() {};
 			};
 			window.Notification.permission = 'granted';
 			window.Notification.requestPermission = function(callback) {

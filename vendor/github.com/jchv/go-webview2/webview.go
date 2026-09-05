@@ -9,6 +9,7 @@ import (
 	"log"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -129,7 +130,82 @@ func NewWithOptions(options WebViewOptions) WebView {
 		log.Fatal(err)
 	}
 
+	// Low-resource tuning: disable browser UI features this app never uses.
+	// Zoom control and accelerator keys stay enabled to preserve Ctrl+-/0,
+	// Ctrl+F and F5 behavior. Failures are non-fatal (older runtimes may
+	// lack some settings).
+	applyLowResourceSettings(settings)
+
+	// Drop telemetry/reporting requests before they cost CPU/radio.
+	setupResourceFilter(chromium)
+
 	return w
+}
+
+// applyLowResourceSettings disables WebView2 features that WhatsApp Web
+// does not need, shaving background work (autofill, dialogs, gestures).
+func applyLowResourceSettings(settings *edge.ICoreWebViewSettings) {
+	disable := []struct {
+		name string
+		fn   func(bool) error
+	}{
+		{"StatusBar", settings.PutIsStatusBarEnabled},
+		{"DefaultScriptDialogs", settings.PutAreDefaultScriptDialogsEnabled},
+		{"PinchZoom", settings.PutIsPinchZoomEnabled},
+		{"SwipeNavigation", settings.PutIsSwipeNavigationEnabled},
+		{"PasswordAutosave", settings.PutIsPasswordAutosaveEnabled},
+		{"GeneralAutofill", settings.PutIsGeneralAutofillEnabled},
+	}
+	for _, s := range disable {
+		if err := s.fn(false); err != nil {
+			log.Printf("WebView2 setting %s: %v", s.name, err)
+		}
+	}
+}
+
+// blockedResourceSubstrings matches requests that are pure overhead:
+// crash/telemetry beacons, CSP violation reports and PWA manifests.
+// Matching is allow-by-default: anything not listed passes through, so
+// chat, media, calls and login can never break from this filter.
+var blockedResourceSubstrings = []string{
+	"crashlog",
+	"analytics",
+	"telemetry",
+	"csp-report",
+	"cspreport",
+	".webmanifest",
+}
+
+// setupResourceFilter answers blocked requests with an empty 204,
+// avoiding the download, parse and renderer wakeups they would cause.
+func setupResourceFilter(chromium *edge.Chromium) {
+	chromium.WebResourceRequestedCallback = func(request *edge.ICoreWebView2WebResourceRequest, args *edge.ICoreWebView2WebResourceRequestedEventArgs) {
+		uri, err := request.GetUri()
+		if err != nil || uri == "" {
+			return
+		}
+		lower := strings.ToLower(uri)
+		blocked := false
+		for _, sub := range blockedResourceSubstrings {
+			if strings.Contains(lower, sub) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			return
+		}
+		env := chromium.Environment()
+		if env == nil {
+			return
+		}
+		resp, err := env.CreateWebResourceResponse(nil, 204, "No Content", "")
+		if err != nil || resp == nil {
+			return
+		}
+		_ = args.PutResponse(resp)
+	}
+	chromium.AddWebResourceRequestedFilter("*", edge.COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)
 }
 
 type rpcMessage struct {
