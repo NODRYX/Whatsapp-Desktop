@@ -119,8 +119,8 @@ func NewWithOptions(options WebViewOptions) WebView {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// disable context menu
-	err = settings.PutAreDefaultContextMenusEnabled(options.Debug)
+	// context menu always enabled for copy/paste (DevTools still gated by Debug)
+	err = settings.PutAreDefaultContextMenusEnabled(true)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -299,6 +299,8 @@ func (w *webview) callbinding(d rpcMessage) (interface{}, error) {
 	}
 }
 
+const wmTrayIcon = 0x8001
+
 func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 	if w, ok := getWindowContext(hwnd).(*webview); ok {
 		switch msg {
@@ -317,6 +319,12 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 			if w.autofocus {
 				w.browser.Focus()
 			}
+		case wmTrayIcon:
+			if lp == 0x0203 || lp == 0x0202 { // WM_LBUTTONDBLCLK or WM_LBUTTONUP
+				_, _, _ = w32.User32ShowWindow.Call(hwnd, 9) // SW_RESTORE
+				_, _, _ = w32.User32SetFocus.Call(hwnd)
+			}
+			return 0
 		case w32.WMClose:
 			_, _, _ = w32.User32DestroyWindow.Call(hwnd)
 		case w32.WMDestroy:
