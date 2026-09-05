@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must exist, default v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = ""
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if (-not $tag) { $tag = "v1.0.0" }
+          "name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved tag: $tag"
+          git fetch --tags --force
+          git show-ref --tags | Out-Host
+          git log --oneline -5 | Out-Host
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install rsrc
+        shell: pwsh
+        run: |
+          go install github.com/akavel/rsrc@latest
+          "$env:USERPROFILE/go/bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          rsrc -help 2>&1 | Select-Object -First 3 | Out-Host
+
+      - name: Regenerate rsrc.syso
+        shell: pwsh
+        run: |
+          rsrc -manifest app.manifest -ico icon.ico -o rsrc.syso -arch amd64
+          Get-ChildItem rsrc.syso | Format-List Length,Name | Out-Host
+
+      - name: Build WhatsApp.exe
+        shell: pwsh
+        run: |
+          go mod download
+          go build -trimpath -ldflags="-H windowsgui -s -w" -o WhatsApp.exe .
+          Get-ChildItem WhatsApp.exe | Format-List Length,Name | Out-Host
+          if (-not (Test-Path WhatsApp.exe)) { throw "Build failed: WhatsApp.exe not found" }
+
+      - name: SHA256
+        shell: pwsh
+        run: |
+          Get-FileHash WhatsApp.exe -Algorithm SHA256 | Format-List | Out-Host
+          (Get-FileHash WhatsApp.exe -Algorithm SHA256).Hash + "  WhatsApp.exe" | Out-File -Encoding ascii WhatsApp.exe.sha256
+          Get-Content WhatsApp.exe.sha256 | Out-Host
+
+      - name: Generate release notes (full history awal->sekarang)
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.name }}"
+          $notes = ".github/RELEASE_NOTES_$tag.md"
+          "# $tag - NODRYX/Whatsapp-Desktop`n`n" | Out-File -Encoding utf8 $notes
+          "Full history dari awal sampai $tag (HEAD $(git rev-parse --short HEAD)):`n" | Out-File -Append -Encoding utf8 $notes
+          "## Commits`n" | Out-File -Append -Encoding utf8 $notes
+          git log --reverse --pretty=format:"- %s (%h) — %ad — %an" --date=short | Out-File -Append -Encoding utf8 $notes
+          "`n`n## Ringkasan Perubahan (dari README)`n" | Out-File -Append -Encoding utf8 $notes
+          "Lihat tabel 6 tema di README `perbedaan-dari-upstream--whats-changed`:`n" | Out-File -Append -Encoding utf8 $notes
+          "- Icon pipeline: logo.avif 740x740 -> gen_icon.py lanczos -> icon.ico multi-size + logo.png`n" | Out-File -Append -Encoding utf8 $notes
+          "- Toast fallback: logo.png -> icon.ico (main.go:118-128)`n" | Out-File -Append -Encoding utf8 $notes
+          "- Hapus User-Agent spoofing (main.go:161-163)`n" | Out-File -Append -Encoding utf8 $notes
+          "- Notification bridge OrigNotification + fallback (main.go:164-202)`n" | Out-File -Append -Encoding utf8 $notes
+          "- Low-resource tuning 6 fitur + resource filter (webview.go:132-207)`n" | Out-File -Append -Encoding utf8 $notes
+          "- Stabilitas chromium.go:281-284 (log.Printf bukan log.Fatal)`n" | Out-File -Append -Encoding utf8 $notes
+          "`n## Build`n" | Out-File -Append -Encoding utf8 $notes
+          "- Go $(go version) | rsrc + go build -ldflags=`"-H windowsgui -s -w`" -trimpath`n" | Out-File -Append -Encoding utf8 $notes
+          "- Runner: windows-latest`n" | Out-File -Append -Encoding utf8 $notes
+          "---`n_Auto-generated dari git log awal->sekarang untuk $tag._`n" | Out-File -Append -Encoding utf8 $notes
+          Get-Content $notes | Out-Host
+          "notes_file=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        id: notes
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.tag.outputs.name }}
+          body_path: ${{ steps.notes.outputs.notes_file }}
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+          files: |
+            WhatsApp.exe
+            WhatsApp.exe.sha256
+            logo.png
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

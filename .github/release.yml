@@ -1,0 +1,26 @@
+changelog:
+  exclude:
+    labels:
+      - ignore
+      - skip-changelog
+  categories:
+    - title: 'Features'
+      labels:
+        - feat
+        - feature
+        - enhancement
+    - title: 'Fixes'
+      labels:
+        - fix
+        - bug
+        - hotfix
+    - title: 'Docs'
+      labels:
+        - docs
+        - documentation
+    - title: 'Other'
+      labels:
+        - chore
+        - refactor
+        - style
+        - perf
