@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ var (
 	procSetFgWindow = user32.NewProc("SetForegroundWindow")
 	procShowNormal  = user32.NewProc("ShowWindow")
 	procDwmSetAttr  = dwmapi.NewProc("DwmSetWindowAttribute")
+	procShellExecute = shell32.NewProc("ShellExecuteW")
 	// geometry helpers
 	procGetWindowRect = user32.NewProc("GetWindowRect")
 	procIsZoomed      = user32.NewProc("IsZoomed")
@@ -228,6 +230,39 @@ func applyWindowGeometry(hwnd uintptr, s *windowState) {
 	}
 }
 
+func isAllowedHost(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	// strip port
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	return host == "web.whatsapp.com"
+}
+
+func openExternalURL(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "mailto:") || strings.HasPrefix(lower, "tel:") {
+		// http/https/mailto/tel allowed to open in system browser
+	} else {
+		return
+	}
+	// Never open allowed host in external browser
+	if isAllowedHost(raw) {
+		return
+	}
+	verb, _ := windows.UTF16PtrFromString("open")
+	uPtr, _ := windows.UTF16PtrFromString(raw)
+	_, _, _ = procShellExecute.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(uPtr)), 0, 0, 1) // SW_SHOWNORMAL
+}
+
 func showNativeNotification(title, message, iconPath string) {
 	notification := toast.Notification{
 		AppID:   "WhatsApp Desktop",
@@ -324,6 +359,10 @@ func main() {
 		}
 		w.SetTitle(t)
 	})
+	// Bind for external links: open in system browser
+	_ = w.Bind("openExternal", func(rawURL string) {
+		openExternalURL(rawURL)
+	})
 
 	// Bridge page notifications to Windows toasts. No User-Agent spoofing:
 	// the WebView2 runtime reports its own current Edge UA (header and JS),
@@ -404,6 +443,57 @@ func main() {
 				if (window.updateWindowTitle) {
 					try { window.updateWindowTitle(document.title); } catch(e) {}
 				}
+			} catch(e) {}
+			// External link handling: open non-web.whatsapp.com in system browser
+			try {
+				function isAllowedHost(href){
+					try {
+						var u = new URL(href, location.href);
+						var proto = u.protocol.toLowerCase();
+						// Only http/https/mailto/tel are considered for external handling
+						if (proto !== 'http:' && proto !== 'https:' && proto !== 'mailto:' && proto !== 'tel:') return true;
+						return u.hostname.toLowerCase() === 'web.whatsapp.com';
+					} catch(e){ return true; }
+				}
+				function shouldOpenExternal(href){
+					if (!href) return false;
+					// Ignore blob/data/about/javascript
+					var l = href.toLowerCase();
+					if (l.startsWith('blob:') || l.startsWith('data:') || l.startsWith('about:') || l.startsWith('javascript:')) return false;
+					return !isAllowedHost(href);
+				}
+				document.addEventListener('click', function(e){
+					var a = e.target.closest && e.target.closest('a[href]');
+					if (!a) return;
+					var href = a.href;
+					// Also handle <a download> or special handlers via attribute
+					if (!href) return;
+					if (a.target === '_blank' || shouldOpenExternal(href) || e.ctrlKey || e.metaKey) {
+						if (shouldOpenExternal(href) && window.openExternal) {
+							e.preventDefault();
+							e.stopPropagation();
+							try { window.openExternal(href); } catch(err) {}
+						}
+					}
+				}, true);
+				// Intercept auxiliary (middle-click) as well
+				document.addEventListener('auxclick', function(e){
+					if (e.button === 1) {
+						var a = e.target.closest && e.target.closest('a[href]');
+						if (a && shouldOpenExternal(a.href) && window.openExternal) {
+							e.preventDefault();
+							try { window.openExternal(a.href); } catch(err) {}
+						}
+					}
+				}, true);
+				var _origOpen = window.open;
+				window.open = function(url, target, features){
+					if (url && shouldOpenExternal(url) && window.openExternal) {
+						try { window.openExternal(url); } catch(err) {}
+						return null;
+					}
+					return _origOpen.apply(this, arguments);
+				};
 			} catch(e) {}
 		})();
 	`
