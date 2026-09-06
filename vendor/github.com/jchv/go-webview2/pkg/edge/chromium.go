@@ -5,8 +5,10 @@ package edge
 
 import (
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"unsafe"
 
@@ -27,6 +29,8 @@ type Chromium struct {
 	webResourceRequested  *iCoreWebView2WebResourceRequestedEventHandler
 	acceleratorKeyPressed *ICoreWebView2AcceleratorKeyPressedEventHandler
 	navigationCompleted   *ICoreWebView2NavigationCompletedEventHandler
+	newWindowRequested    *ICoreWebView2NewWindowRequestedEventHandler
+	navigationStarting    *ICoreWebView2NavigationStartingEventHandler
 
 	environment *ICoreWebView2Environment
 
@@ -64,6 +68,8 @@ func NewChromium() *Chromium {
 	e.webResourceRequested = newICoreWebView2WebResourceRequestedEventHandler(e)
 	e.acceleratorKeyPressed = newICoreWebView2AcceleratorKeyPressedEventHandler(e)
 	e.navigationCompleted = newICoreWebView2NavigationCompletedEventHandler(e)
+	e.newWindowRequested = newICoreWebView2NewWindowRequestedEventHandler(e)
+	e.navigationStarting = newICoreWebView2NavigationStartingEventHandler(e)
 	e.permissions = make(map[CoreWebView2PermissionKind]CoreWebView2PermissionState)
 
 	return e
@@ -218,6 +224,16 @@ func (e *Chromium) CreateCoreWebView2ControllerCompleted(res uintptr, controller
 		uintptr(unsafe.Pointer(e.navigationCompleted)),
 		uintptr(unsafe.Pointer(&token)),
 	)
+	_, _, _ = e.webview.vtbl.AddNewWindowRequested.Call(
+		uintptr(unsafe.Pointer(e.webview)),
+		uintptr(unsafe.Pointer(e.newWindowRequested)),
+		uintptr(unsafe.Pointer(&token)),
+	)
+	_, _, _ = e.webview.vtbl.AddNavigationStarting.Call(
+		uintptr(unsafe.Pointer(e.webview)),
+		uintptr(unsafe.Pointer(e.navigationStarting)),
+		uintptr(unsafe.Pointer(&token)),
+	)
 
 	_ = e.controller.AddAcceleratorKeyPressed(e.acceleratorKeyPressed, &token)
 
@@ -343,6 +359,75 @@ func (e *Chromium) NavigationCompleted(sender *ICoreWebView2, args *ICoreWebView
 	if e.NavigationCompletedCallback != nil {
 		e.NavigationCompletedCallback(sender, args)
 	}
+	return 0
+}
+
+var (
+	edgeShell32        = windows.NewLazySystemDLL("shell32.dll")
+	edgeShellExecuteW  = edgeShell32.NewProc("ShellExecuteW")
+)
+
+func edgeIsAllowedHost(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	return host == "web.whatsapp.com"
+}
+
+func edgeOpenExternal(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	lower := strings.ToLower(raw)
+	if !(strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "mailto:") || strings.HasPrefix(lower, "tel:")) {
+		return
+	}
+	if edgeIsAllowedHost(raw) {
+		return
+	}
+	if strings.HasPrefix(lower, "blob:") || strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "about:") || strings.HasPrefix(lower, "javascript:") {
+		return
+	}
+	verb, _ := windows.UTF16PtrFromString("open")
+	uPtr, _ := windows.UTF16PtrFromString(raw)
+	_, _, _ = edgeShellExecuteW.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(uPtr)), 0, 0, 1)
+}
+
+func (e *Chromium) NewWindowRequested(sender *ICoreWebView2, args *ICoreWebView2NewWindowRequestedEventArgs) uintptr {
+	uri, err := args.GetUri()
+	if err != nil || uri == "" {
+		return 0
+	}
+	if edgeIsAllowedHost(uri) {
+		return 0
+	}
+	_ = args.PutHandled(true)
+	edgeOpenExternal(uri)
+	return 0
+}
+
+func (e *Chromium) NavigationStarting(sender *ICoreWebView2, args *ICoreWebView2NavigationStartingEventArgs) uintptr {
+	uri, err := args.GetUri()
+	if err != nil || uri == "" {
+		return 0
+	}
+	if edgeIsAllowedHost(uri) {
+		return 0
+	}
+	// Only cancel user-initiated top-level navigations away from web.whatsapp.com
+	// Redirects or background resource loads are ignored (handled by WebResource filter).
+	lower := strings.ToLower(uri)
+	if !(strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) {
+		return 0
+	}
+	_ = args.PutCancel(true)
+	edgeOpenExternal(uri)
 	return 0
 }
 
